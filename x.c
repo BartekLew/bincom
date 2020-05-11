@@ -1,10 +1,8 @@
-typedef void (*PrintCall) (char *fmt, ...);
-typedef void (*ExitCall) (int code);
-
-const PrintCall print = (PrintCall) 0x804fd50;
-const ExitCall close = (ExitCall) 0x8050490;
+extern void (*print)(int, char *fmt, ...);
+extern void (*close)(int code);
+extern char data;
 
 int _start(int argc, char **argv) {
-    print("%s\n", 0x80df951);
+    print(10, "%s\n", &data);
     close(0);
 }
