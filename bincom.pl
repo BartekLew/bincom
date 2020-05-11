@@ -70,84 +70,158 @@ on_file("objdump -h '$bin' |", sub {
     });
 });
 
-my @code = ();
-my %labels = ();
-my $lastlab = 0;
+sub lines {
+    my ($fh, $interp, $stopcond) = @_;
+    my @result = ();
 
-sub newlab {
-    my ($type) = @_;
-    $lastlab++;
-    return sprintf("${type}_%x", $lastlab);
-}
-
-sub addrlab {
-    my ($addr, $rip, $type, $name) = @_;
-
-    if($addr =~ /^[[:xdigit:]]+\s*$/) {
-        if(defined($name)) {
-            $labels{$addr} = $name;
-        } else {
-            $labels{$addr} = newlab($type) unless(defined($labels{$addr}));
+    while(my $line = <$fh>) {
+        my $ans = &$interp($line);
+        if (defined($ans)) {
+            push(@result, $ans);
         }
 
-        return $labels{$addr};
-    } elsif ($addr =~ /^*(0x[[:xdigit:]]+\(%rip\))/) {
-        my $efadr = sprintf("%x", $rip + $1);
-        if(defined($name)) {
-            $labels{$efadr} = $name;
-        } else {
-            $labels{$efadr} = newlab($type) unless(defined($labels{$efadr}));
-        }
-        return $labels{$efadr};
-    } 
+        last if(defined($ans) && &$stopcond($ans));
+    }
 
-    return $addr;
+    return \@result;
 }
 
-my $entry = get_entry($bin);
-$labels{$entry} = "entry";
-on_file("objdump -d -j .text --start-address=0x$entry '$bin' |", sub {
-    my ($disasm) = @_;
+sub disassemble {
+    my ($file, $entry, $label) = @_;
 
-    while (my $line = <$disasm>) {
-        if($line =~ /^([[:xdigit:]]+) <([^@]+)@@([^->]+)>:/) {
-            my ($addr, $lab) = (trim($1), $2);
-            $addr =~ s/^0+//;
-            $labels{$addr} = $lab;
-        } elsif ($line =~ /^\s*([[:xdigit:]]+):\s+(([[:xdigit:]]{2} )+)\s+((addr32\s+)?\w+)\s*([^<#\t\n]+)?(.*$)?/) {
-            my ($op, $args, $addr, $mc, $rest) = ($4, $6, trim($1), $2, $7);
-            if($op =~ /^(addr32\s+)?(call|j\w+)/) {
-                my $type = $2;
-                my $rip = "0x$addr" + scalar(split(/ /, $mc));
-                if($rest =~ /<([^>-]+)>/) {
-                    $args = addrlab(trim($args), $rip, $type, $1);
-                } else {
-                    $args = addrlab(trim($args), $rip, $type);
-                }
+    my %labels = ($entry => $label);
+    my $lastlab = 0;
+    
+    sub newlab {
+        my ($type) = @_;
+        $lastlab++;
+        return sprintf("${type}_%x", $lastlab);
+    }
+    
+    sub addrlab {
+        my ($addr, $rip, $type, $name) = @_;
+    
+        if($addr =~ /^[[:xdigit:]]+\s*$/) {
+            if(defined($name)) {
+                $labels{$addr} = $name;
+            } else {
+                $labels{$addr} = newlab($type) unless(defined($labels{$addr}));
             }
     
-            if($args =~ /%eiz/) {
-                push(@code, [$addr, "_raw_", $mc, $op, $args]);
+            return $labels{$addr};
+        } elsif ($addr =~ /^*(0x[[:xdigit:]]+\(%rip\))/) {
+            my $efadr = sprintf("%x", $rip + $1);
+            if(defined($name)) {
+                $labels{$efadr} = $name;
             } else {
-                push(@code, [$addr, $op, $args, $mc]);
+                $labels{$efadr} = newlab($type) unless(defined($labels{$efadr}));
             }
-
-            last if($op =~ /(jmp|ret)/);
-        } elsif ($line =~ /^\s*([[:xdigit:]]+):\s*(([[:xdigit:]]{2} ?)+)(.*)/) {
-            my ($addr, $mc, $rest) = (trim($1), $2, $3);
-            push(@code, [$addr, "_raw_", $mc, $rest]);
+            return $labels{$efadr};
         } 
+    
+        return $addr;
     }
-});
 
-for my $line (@code) {
+    my $code = on_file("objdump -d -j .text --start-address=0x$entry '$file' |", sub {
+        my ($disasm) = @_;
+    
+        return lines($disasm, sub {
+            my ($line) = @_;
+            if($line =~ /^([[:xdigit:]]+) <([^@]+)@@([^->]+)>:/) {
+                my ($addr, $lab) = (trim($1), $2);
+                $addr =~ s/^0+//;
+                $labels{$addr} = $lab;
+            } elsif ($line =~ /^\s*([[:xdigit:]]+):\s+(([[:xdigit:]]{2} )+)\s+((addr32\s+)?\w+)\s*([^<#\t\n]+)?(.*$)?/) {
+                my ($op, $args, $addr, $mc, $rest) = ($4, $6, trim($1), $2, $7);
+                if($op =~ /^(addr32\s+)?(call|j\w+)/) {
+                    my $type = $2;
+                    my $rip = "0x$addr" + scalar(split(/ /, $mc));
+                    if($rest =~ /<([^>-]+)>/) {
+                        $1 =~ /^_*([^@]+)/;
+                        $args = addrlab(trim($args), $rip, $type, "$1");
+                    } else {
+                        $args = addrlab(trim($args), $rip, $type);
+                    }
+                }
+        
+                if($args =~ /%eiz/) {
+                    return [$addr, "_raw_", $mc, $op, $args];
+                } else {
+                    return [$addr, $op, $args, $mc];
+                }
+            } elsif ($line =~ /^\s*([[:xdigit:]]+):\s*(([[:xdigit:]]{2} ?)+)(.*)/) {
+                my ($addr, $mc, $rest) = (trim($1), $2, $3);
+                return [$addr, "_raw_", $mc, $rest];
+            } 
+            return undef;
+        }, sub { $_[0]->[1] =~ /(ret|jmp)/ });
+    });
+
+    return (\%labels, $code);
+}
+
+sub code_block {
+    my ($code) = @_;
+
+    my @base = sort {"0x$a->[0]" >= "0x$b->[0]"} @$code;
+    my $last = shift @base;
+    my @acc = ($last);
+
+    for my $next (@base) {
+        my $lastaddr = "0x$last->[0]";
+        my $lastmc;
+        if($last->[1] eq "_raw_") {
+            $lastmc = $last->[2];
+        } else {
+            $lastmc = $last->[3];
+        }
+        my $rip = sprintf("%x", $lastaddr + scalar(split /\s+/, $lastmc));
+        if("0x$rip" != "0x$next->[0]") {
+            push(@acc, ["\nunused", $rip, $next->[0], "0x$next->[0]" - "0x$rip"]);
+        } 
+
+        push(@acc, $next);
+        $last = $next;
+    }
+
+    return \@acc;
+}
+
+sub disassemble_function {
+    my ($binary, $entry, $label) = @_;
+
+    my @ignore_labels = ();
+    my ($labels, $code) = disassemble($binary, $entry, $label); 
+    my @more_labels = keys %$labels;
+
+    while (scalar(@more_labels) > 0) {
+        my $lab = shift @more_labels;
+
+        if($labels->{$lab} =~ /^j/ && !(grep {$_ eq $lab} @ignore_labels)) {
+            print "more $lab/$labels->{$lab}...\n";
+            my ($nlabs, $ncode) = disassemble($binary, $lab, $labels->{$lab});
+
+            push(@$code, @$ncode);
+            %$labels = (%$labels, %$nlabs);
+            push(@ignore_labels, $lab);
+        }
+    }
+
+    return ($labels, code_block($code));
+}
+
+my ($labels, $code) = disassemble_function($bin, get_entry($bin), "entry");
+
+for my $line (@$code) {
     my $addr = $line->[0];
-    if(defined($labels{$addr})) {
-        print "\n$labels{$addr}:\n";
+    if(defined($labels->{$addr})) {
+        print "\n$labels->{$addr}:\n";
     }
     print join(" / ", @$line) . "\n";
 }
 
-for my $addr (keys %labels) {
-    print "$addr -> $labels{$addr}\n";
+print "\n";
+
+for my $addr (keys %$labels) {
+    print "$addr -> $labels->{$addr}\n";
 }
