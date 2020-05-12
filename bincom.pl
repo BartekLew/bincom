@@ -47,6 +47,7 @@ sub get_entry {
 }
 
 my ($bin) = @ARGV;
+my %sections = ();
 
 on_file("objdump -h '$bin' |", sub {
     my ($sections) = @_;
@@ -63,12 +64,29 @@ on_file("objdump -h '$bin' |", sub {
             my ($x, $ind, $name, $len, $vma, $lma, $fpos, $align, @flags) =
                     split /\s+/, "$_[0] $_[1]";
             $vma =~ s/^0*/0x0/;
+            $len =~ s/^0*/0x0/;
+
+            $sections{$name} = [$vma,sprintf("0x%x", $vma+$len),$fpos];
+
             print $symbols "    . = $vma;\n";
             print $symbols "    $name : { *($name) }\n";
         } collect {<$sections>};
         print $symbols "}\n\n";
     });
 });
+
+sub sectof {
+    my ($addr) = @_;
+    for my $sect (keys %sections) {
+        my @range = @{$sections{$sect}};
+        if("0x$addr" >= $range[0] && "0x$addr" < $range[1]) {
+            $sect =~ s/^\.//;
+            return $sect;
+        }
+    }
+
+    return "unknown";
+}
 
 sub lines {
     my ($fh, $interp, $stopcond) = @_;
@@ -93,9 +111,9 @@ sub disassemble {
     my $lastlab = 0;
     
     sub newlab {
-        my ($type) = @_;
+        my ($sect, $type) = @_;
         $lastlab++;
-        return sprintf("${type}_%x", $lastlab);
+        return sprintf("${sect}_${type}_%x", $lastlab);
     }
     
     sub addrlab {
@@ -105,7 +123,7 @@ sub disassemble {
             if(defined($name)) {
                 $labels{$addr} = $name;
             } else {
-                $labels{$addr} = newlab($type) unless(defined($labels{$addr}));
+                $labels{$addr} = newlab(sectof($addr), $type) unless(defined($labels{$addr}));
             }
     
             return $labels{$addr};
@@ -114,7 +132,7 @@ sub disassemble {
             if(defined($name)) {
                 $labels{$efadr} = $name;
             } else {
-                $labels{$efadr} = newlab($type) unless(defined($labels{$efadr}));
+                $labels{$efadr} = newlab(sectof($efadr), $type) unless(defined($labels{$efadr}));
             }
             return $labels{$efadr};
         } 
@@ -141,10 +159,12 @@ sub disassemble {
             my $rip = "0x$addr" + scalar(split(/ /, $mc));
 
             $args = addrlab(trim($args), $rip, $type, detect_label($rest));
-        } elsif ($op =~ /^lea/) {
+        } elsif ($op =~ /^(lea|mov)/) {
             my $rip = "0x$addr" + scalar(split(/ /, $mc));
             my @opnds = split(",", $args);
-            $opnds[0] = addrlab($opnds[0], $rip, "lea", detect_label($rest));
+            for(my $i = 0; $i<2; $i++) {
+                $opnds[$i] = addrlab($opnds[$i], $rip, $1, detect_label($rest));
+            }
             $args = join(",", @opnds);
         }
 
@@ -217,7 +237,7 @@ sub disassemble_function {
     while (scalar(@more_labels) > 0) {
         my $lab = shift @more_labels;
 
-        if($labels->{$lab} =~ /^j/ && !(grep {$_ eq $lab} @ignore_labels)) {
+        if($labels->{$lab} =~ /\w+_j/ && !(grep {$_ eq $lab} @ignore_labels)) {
             print "more $lab/$labels->{$lab}...\n";
             my ($nlabs, $ncode) = disassemble($binary, $lab, $labels->{$lab});
 
