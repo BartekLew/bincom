@@ -122,6 +122,35 @@ sub disassemble {
         return $addr;
     }
 
+    sub detect_label {
+        my ($rest) = @_;
+
+        if($rest =~ /<([^>\-+]+)>/) {
+            $1 =~ /^_*([^@]+)/;
+            return $1;
+        }
+
+        return undef;
+    }
+
+    sub adjust_args {
+        my ($op, $args, $addr, $mc, $rest) = @_;
+
+        if($op =~ /^(addr32\s+)?(call|j\w+)/) {
+            my $type = $2;
+            my $rip = "0x$addr" + scalar(split(/ /, $mc));
+
+            $args = addrlab(trim($args), $rip, $type, detect_label($rest));
+        } elsif ($op =~ /^lea/) {
+            my $rip = "0x$addr" + scalar(split(/ /, $mc));
+            my @opnds = split(",", $args);
+            $opnds[0] = addrlab($opnds[0], $rip, "lea", detect_label($rest));
+            $args = join(",", @opnds);
+        }
+
+        return $args;
+    }
+
     my $code = on_file("objdump -d -j .text --start-address=0x$entry '$file' |", sub {
         my ($disasm) = @_;
     
@@ -133,16 +162,7 @@ sub disassemble {
                 $labels{$addr} = $lab;
             } elsif ($line =~ /^\s*([[:xdigit:]]+):\s+(([[:xdigit:]]{2} )+)\s+((addr32\s+)?\w+)\s*([^<#\t\n]+)?(.*$)?/) {
                 my ($op, $args, $addr, $mc, $rest) = ($4, $6, trim($1), $2, $7);
-                if($op =~ /^(addr32\s+)?(call|j\w+)/) {
-                    my $type = $2;
-                    my $rip = "0x$addr" + scalar(split(/ /, $mc));
-                    if($rest =~ /<([^>-]+)>/) {
-                        $1 =~ /^_*([^@]+)/;
-                        $args = addrlab(trim($args), $rip, $type, "$1");
-                    } else {
-                        $args = addrlab(trim($args), $rip, $type);
-                    }
-                }
+                $args = adjust_args($op, $args, $addr, $mc, $rest);
         
                 if($args =~ /%eiz/) {
                     return [$addr, "_raw_", $mc, $op, $args];
