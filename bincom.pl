@@ -117,24 +117,24 @@ sub disassemble {
     }
     
     sub addrlab {
-        my ($addr, $rip, $type, $name) = @_;
+        my ($addr, $rip, $type, $name, $labels) = @_;
     
         if($addr =~ /^[[:xdigit:]]+\s*$/) {
             if(defined($name)) {
-                $labels{$addr} = $name;
+                $labels->{$addr} = $name;
             } else {
-                $labels{$addr} = newlab(sectof($addr), $type) unless(defined($labels{$addr}));
+                $labels->{$addr} = newlab(sectof($addr), $type) unless(defined($labels->{$addr}));
             }
-    
-            return $labels{$addr};
-        } elsif ($addr =~ /^*(0x[[:xdigit:]]+\(%rip\))/) {
+            return $labels->{$addr};
+        } elsif ($addr =~ /^*(-?0x[[:xdigit:]]+\(%rip\))/) {
             my $efadr = sprintf("%x", $rip + $1);
             if(defined($name)) {
-                $labels{$efadr} = $name;
+                $labels->{$efadr} = $name;
             } else {
-                $labels{$efadr} = newlab(sectof($efadr), $type) unless(defined($labels{$efadr}));
+                $labels->{$efadr} = newlab(sectof($efadr), $type) unless(defined($labels->{$efadr}));
             }
-            return $labels{$efadr};
+
+            return $labels->{$efadr};
         } 
     
         return $addr;
@@ -152,18 +152,18 @@ sub disassemble {
     }
 
     sub adjust_args {
-        my ($op, $args, $addr, $mc, $rest) = @_;
+        my ($op, $args, $addr, $mc, $rest, $labels) = @_;
 
         if($op =~ /^(addr32\s+)?(call|j\w+)/) {
             my $type = $2;
             my $rip = "0x$addr" + scalar(split(/ /, $mc));
 
-            $args = addrlab(trim($args), $rip, $type, detect_label($rest));
+            $args = addrlab(trim($args), $rip, $type, detect_label($rest), $labels);
         } elsif ($op =~ /^(lea|mov)/) {
             my $rip = "0x$addr" + scalar(split(/ /, $mc));
             my @opnds = split(",", $args);
             for(my $i = 0; $i<2; $i++) {
-                $opnds[$i] = addrlab($opnds[$i], $rip, $1, detect_label($rest));
+                $opnds[$i] = addrlab($opnds[$i], $rip, $1, detect_label($rest),$labels);
             }
             $args = join(",", @opnds);
         }
@@ -176,13 +176,13 @@ sub disassemble {
     
         return lines($disasm, sub {
             my ($line) = @_;
-            if($line =~ /^([[:xdigit:]]+) <([^@]+)@@([^->]+)>:/) {
+            if($line =~ /^([[:xdigit:]]+) <([^@]+)@@([^-+>]+)>:/) {
                 my ($addr, $lab) = (trim($1), $2);
                 $addr =~ s/^0+//;
                 $labels{$addr} = $lab;
             } elsif ($line =~ /^\s*([[:xdigit:]]+):\s+(([[:xdigit:]]{2} )+)\s+((addr32\s+)?\w+)\s*([^<#\t\n]+)?(.*$)?/) {
                 my ($op, $args, $addr, $mc, $rest) = ($4, $6, trim($1), $2, $7);
-                $args = adjust_args($op, $args, $addr, $mc, $rest);
+                $args = adjust_args($op, $args, $addr, $mc, $rest, \%labels);
         
                 if($args =~ /%eiz/) {
                     return [$addr, "_raw_", $mc, $op, $args];
@@ -200,14 +200,21 @@ sub disassemble {
     return (\%labels, $code);
 }
 
+sub peek {
+    print "$_[0]\n";
+    return $_[0];
+}
+
+my $totunus = 0;
 sub code_block {
     my ($code) = @_;
 
-    my @base = sort {"0x$a->[0]" >= "0x$b->[0]"} @$code;
+    my @base = sort {hex("0x$a->[0]") <=> hex("0x$b->[0]");} @$code;
     my $last = shift @base;
     my @acc = ($last);
 
     for my $next (@base) {
+        next if ($next->[0] eq $last->[0]);
         my $lastaddr = "0x$last->[0]";
         my $lastmc;
         if($last->[1] eq "_raw_") {
@@ -218,6 +225,7 @@ sub code_block {
         my $rip = sprintf("%x", $lastaddr + scalar(split /\s+/, $lastmc));
         if("0x$rip" != "0x$next->[0]") {
             push(@acc, ["\nunused", $rip, $next->[0], "0x$next->[0]" - "0x$rip"]);
+            $totunus += "0x$next->[0]" - "0x$rip";
         } 
 
         push(@acc, $next);
@@ -237,13 +245,17 @@ sub disassemble_function {
     while (scalar(@more_labels) > 0) {
         my $lab = shift @more_labels;
 
-        if($labels->{$lab} =~ /\w+_j/ && !(grep {$_ eq $lab} @ignore_labels)) {
-            print "more $lab/$labels->{$lab}...\n";
+        print STDERR (scalar(@more_labels) . "/" . scalar(@ignore_labels) . "\r");
+        #print ("disass fun $lab($labels->{$lab}):\n  more: " . join(",", @more_labels)
+        #            . "\n  ignore: " . join(",", @ignore_labels) . "\n");
+
+        if(sectof($lab) eq "text" && !(grep {$_ eq $lab} @ignore_labels)) {
             my ($nlabs, $ncode) = disassemble($binary, $lab, $labels->{$lab});
 
             push(@$code, @$ncode);
             %$labels = (%$labels, %$nlabs);
             push(@ignore_labels, $lab);
+            push(@more_labels, keys %$nlabs);
         }
     }
 
@@ -265,3 +277,5 @@ print "\n";
 for my $addr (keys %$labels) {
     print "$addr -> $labels->{$addr}\n";
 }
+
+print "$totunus\n";
